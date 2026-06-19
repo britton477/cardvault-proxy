@@ -410,6 +410,43 @@ http.createServer((req, res) => {
     return;
   }
 
+  // ── POST /detect-card ── Anthropic vision proxy (avoids browser CORS block) ──
+  if (p === '/detect-card' && req.method === 'POST') {
+    let body = '';
+    req.on('data', d => { body += d; if (body.length > 20 * 1024 * 1024) { res.writeHead(413); res.end(); } });
+    req.on('end', () => {
+      let payload;
+      try { payload = JSON.parse(body); } catch(e) { return jsonError(res, 400, 'Invalid JSON'); }
+      const { image, mimeType, apiKey } = payload;
+      if (!image || !apiKey) return jsonError(res, 400, 'Missing image or apiKey');
+      const anthropicBody = JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 600,
+        messages: [{ role: 'user', content: [
+          { type: 'image', source: { type: 'base64', media_type: mimeType || 'image/jpeg', data: image } },
+          { type: 'text', text: 'Identify this Pokémon TCG card. Return ONLY a valid JSON object, no markdown, no explanation:\n{"cardName":"","setName":"","setCode":"","cardNumber":"","condition":"NM","conditionNotes":"","isGraded":false,"grader":null,"grade":null,"language":"EN","confidence":"high","notes":""}\nCondition values: NM, LP, MP, HP, DMG. Confidence: high, medium, low. If you cannot identify the card, set confidence to "low" and fill what you can see.' }
+        ]}]
+      });
+      fetchUrl('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(anthropicBody)
+        },
+        body: anthropicBody
+      }, (err, data) => {
+        if (err) return jsonError(res, 502, 'Anthropic error: ' + err.message);
+        try {
+          const parsed = JSON.parse(data);
+          jsonOk(res, parsed);
+        } catch(e) { jsonError(res, 502, 'Bad response from Anthropic'); }
+      });
+    });
+    return;
+  }
+
   jsonError(res, 404, 'Unknown endpoint: ' + p);
 
 }).listen(PORT, '0.0.0.0', () => {
