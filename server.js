@@ -424,7 +424,7 @@ http.createServer((req, res) => {
         max_tokens: 600,
         messages: [{ role: 'user', content: [
           { type: 'image', source: { type: 'base64', media_type: mimeType || 'image/jpeg', data: image } },
-          { type: 'text', text: 'Identify this Pokémon TCG card. Return ONLY a valid JSON object, no markdown, no explanation:\n{"cardName":"","setName":"","setCode":"","cardNumber":"","condition":"NM","conditionNotes":"","isGraded":false,"grader":null,"grade":null,"language":"EN","confidence":"high","notes":""}\nCondition values: NM, LP, MP, HP, DMG. Confidence: high, medium, low. If you cannot identify the card, set confidence to "low" and fill what you can see.' }
+          { type: 'text', text: 'Identify this Pokémon TCG card. Return ONLY a valid JSON object, no markdown, no explanation:\n{"cardName":"","setName":"","setCode":"","cardNumber":"","condition":"NM","conditionNotes":"","isGraded":false,"grader":null,"grade":null,"language":"EN","confidence":"high","notes":""}\n\nRules:\n- cardName: ALWAYS use the official English name (e.g. "Charizard" not "リザードン"), even for Japanese cards\n- language: "EN" for English, "JP" for Japanese, "KR" for Korean etc.\n- setCode: for Japanese cards use the Japanese set code (e.g. SV1J, S10a, SM7J). For English use PTCGO code (e.g. SVI, OBF)\n- cardNumber: the number printed on the card\n- Condition values: NM, LP, MP, HP, DMG\n- Confidence: high/medium/low — use "low" if you cannot clearly identify the card\n- notes: mention if Japanese, Korean, or other non-English print' }
         ]}]
       });
       fetchUrl('https://api.anthropic.com/v1/messages', {
