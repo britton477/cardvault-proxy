@@ -178,15 +178,19 @@ http.createServer((req, res) => {
 
   // ── GET /ebay-price ── Browse API (active UK listings) ────────────────────
   if (p === '/ebay-price') {
-    const q      = (url.searchParams.get('q')      || '').trim();
-    const appId  = (url.searchParams.get('appid')  || '').trim();
-    const secret = (url.searchParams.get('secret') || '').trim();
+    const q        = (url.searchParams.get('q')      || '').trim();
+    const appId    = (url.searchParams.get('appid')  || '').trim();
+    const secret   = (url.searchParams.get('secret') || '').trim();
+    const isGraded = url.searchParams.get('graded') === '1';
     if (!q || !appId || !secret) return jsonError(res, 400, 'Missing q, appid, or secret');
+
+    // Graded card listings to exclude when pricing raw cards
+    const GRADED_RE = /\b(PSA|BGS|CGC|SGC|ACE|Arkezon|Beckett|graded|slab|slabbed)\b/i;
 
     getAppToken(appId, secret, (err, token) => {
       if (err) return jsonError(res, 502, 'Auth failed: ' + err.message);
       fetchUrl('https://api.ebay.com/buy/browse/v1/item_summary/search?q='
-        + encodeURIComponent(q) + '&limit=20&fieldgroups=MATCHING_ITEMS', {
+        + encodeURIComponent(q) + '&limit=40&fieldgroups=MATCHING_ITEMS', {
         headers: {
           'Authorization':           'Bearer ' + token,
           'X-EBAY-C-MARKETPLACE-ID': 'EBAY_GB',
@@ -198,8 +202,13 @@ http.createServer((req, res) => {
         if (status === 401) return jsonError(res, 401, 'Token rejected — check App ID and Secret');
         if (status !== 200) return jsonError(res, status, 'eBay Browse returned HTTP ' + status);
         try {
-          const data   = JSON.parse(body);
-          const items  = (data.itemSummaries || []).filter(i => i.price && parseFloat(i.price.value) > 0);
+          const data  = JSON.parse(body);
+          const items = (data.itemSummaries || []).filter(i => {
+            if (!i.price || parseFloat(i.price.value) <= 0) return false;
+            // Filter out graded listings unless the card being priced is itself graded
+            if (!isGraded && GRADED_RE.test(i.title || '')) return false;
+            return true;
+          });
           const prices = items.map(i => Math.round(parseFloat(i.price.value) * 100) / 100).sort((a,b) => a - b);
           const median = prices.length ? prices[Math.floor(prices.length / 2)] : null;
           jsonOk(res, { prices, median, count: prices.length, total: data.total || 0,
