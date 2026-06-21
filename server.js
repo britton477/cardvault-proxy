@@ -184,52 +184,76 @@ http.createServer((req, res) => {
     const isGraded = url.searchParams.get('graded') === '1';
     if (!q || !appId || !secret) return jsonError(res, 400, 'Missing q, appid, or secret');
 
-    // Graded card listings to exclude when pricing raw cards
     const GRADED_RE = /\b(PSA|BGS|CGC|SGC|ACE|Arkezon|Beckett|graded|grade\s*\d|gem\s*mint|slab|slabbed)\b/i;
+    // Expand search window until we have at least 3 clean prices
+    // Windows: 14 days → 30 → 60 → 90 → no date limit
+    const WINDOWS = [14, 30, 60, 90, null];
+    const MIN_PRICES = 3;
+
+    function applyIQR(prices) {
+      if (prices.length >= 6) {
+        const q1 = prices[Math.floor(prices.length * 0.25)];
+        const q3 = prices[Math.floor(prices.length * 0.75)];
+        const iqr = q3 - q1;
+        prices = prices.filter(p => p >= q1 - 1.5 * iqr && p <= q3 + 1.5 * iqr);
+      }
+      return prices;
+    }
 
     getAppToken(appId, secret, (err, token) => {
       if (err) return jsonError(res, 502, 'Auth failed: ' + err.message);
-      // Only listings from the past 14 days — avoids stale overpriced older stock
-      const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().split('.')[0] + 'Z';
-      const dateFilter = 'itemStartDate:[' + since + '..]';
-      fetchUrl('https://api.ebay.com/buy/browse/v1/item_summary/search?q='
-        + encodeURIComponent(q) + '&limit=50&filter=' + encodeURIComponent(dateFilter) + '&fieldgroups=MATCHING_ITEMS', {
-        headers: {
-          'Authorization':           'Bearer ' + token,
-          'X-EBAY-C-MARKETPLACE-ID': 'EBAY_GB',
-          'Accept':                  'application/json',
-          'Accept-Encoding':         'gzip, deflate'
+
+      function tryWindow(windowIdx) {
+        if (windowIdx >= WINDOWS.length) {
+          // Exhausted all windows — return empty
+          return jsonOk(res, { prices: [], median: null, count: 0, total: 0, items: [], daysUsed: null });
         }
-      }, (err, body, status) => {
-        if (err) return jsonError(res, 502, err.message);
-        if (status === 401) return jsonError(res, 401, 'Token rejected — check App ID and Secret');
-        if (status !== 200) return jsonError(res, status, 'eBay Browse returned HTTP ' + status);
-        try {
-          const data  = JSON.parse(body);
-          const items = (data.itemSummaries || []).filter(i => {
-            if (!i.price || parseFloat(i.price.value) <= 0) return false;
-            // Filter out graded listings unless the card being priced is itself graded
-            if (!isGraded && GRADED_RE.test(i.title || '')) return false;
-            return true;
-          });
+        const days = WINDOWS[windowIdx];
+        let filterParts = [];
+        if (days !== null) {
+          const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('.')[0] + 'Z';
+          filterParts.push('itemStartDate:[' + since + '..]');
+        }
+        const filterStr = filterParts.length ? '&filter=' + encodeURIComponent(filterParts.join(',')) : '';
 
-          let prices = items.map(i => Math.round(parseFloat(i.price.value) * 100) / 100).sort((a,b) => a - b);
-
-          // IQR outlier removal — strips extreme high/low values before calculating median
-          if (prices.length >= 6) {
-            const q1 = prices[Math.floor(prices.length * 0.25)];
-            const q3 = prices[Math.floor(prices.length * 0.75)];
-            const iqr = q3 - q1;
-            const lo  = q1 - 1.5 * iqr;
-            const hi  = q3 + 1.5 * iqr;
-            prices = prices.filter(p => p >= lo && p <= hi);
+        fetchUrl('https://api.ebay.com/buy/browse/v1/item_summary/search?q='
+          + encodeURIComponent(q) + '&limit=50' + filterStr + '&fieldgroups=MATCHING_ITEMS', {
+          headers: {
+            'Authorization':           'Bearer ' + token,
+            'X-EBAY-C-MARKETPLACE-ID': 'EBAY_GB',
+            'Accept':                  'application/json',
+            'Accept-Encoding':         'gzip, deflate'
           }
+        }, (err, body, status) => {
+          if (err) return jsonError(res, 502, err.message);
+          if (status === 401) return jsonError(res, 401, 'Token rejected — check App ID and Secret');
+          if (status !== 200) return jsonError(res, status, 'eBay Browse returned HTTP ' + status);
+          try {
+            const data  = JSON.parse(body);
+            const items = (data.itemSummaries || []).filter(i => {
+              if (!i.price || parseFloat(i.price.value) <= 0) return false;
+              if (!isGraded && GRADED_RE.test(i.title || '')) return false;
+              return true;
+            });
+            let prices = items.map(i => Math.round(parseFloat(i.price.value) * 100) / 100).sort((a,b) => a - b);
+            prices = applyIQR(prices);
 
-          const median = prices.length ? prices[Math.floor(prices.length / 2)] : null;
-          jsonOk(res, { prices, median, count: prices.length, total: data.total || 0,
-            items: items.slice(0,5).map(i => ({title:i.title, price:parseFloat(i.price.value), url:i.itemWebUrl})) });
-        } catch(e) { jsonError(res, 502, 'Parse error'); }
-      });
+            if (prices.length < MIN_PRICES) {
+              // Not enough — try the next wider window
+              return tryWindow(windowIdx + 1);
+            }
+
+            const median = prices[Math.floor(prices.length / 2)];
+            jsonOk(res, {
+              prices, median, count: prices.length, total: data.total || 0,
+              daysUsed: days,
+              items: items.slice(0, 5).map(i => ({ title: i.title, price: parseFloat(i.price.value), url: i.itemWebUrl }))
+            });
+          } catch(e) { jsonError(res, 502, 'Parse error'); }
+        });
+      }
+
+      tryWindow(0);
     });
     return;
   }
@@ -466,6 +490,49 @@ http.createServer((req, res) => {
           const parsed = JSON.parse(data);
           jsonOk(res, parsed);
         } catch(e) { jsonError(res, 502, 'Bad response from Anthropic'); }
+      });
+    });
+    return;
+  }
+
+  // ── GET /ebay-orders ── Fulfillment API (recent paid orders) ─────────────────
+  if (p === '/ebay-orders') {
+    const appId  = (url.searchParams.get('appid')  || '').trim();
+    const secret = (url.searchParams.get('secret') || '').trim();
+    const days   = Math.min(parseInt(url.searchParams.get('days') || '60', 10), 90);
+    if (!appId || !secret) return jsonError(res, 400, 'Missing appid or secret');
+
+    getSellerToken(appId, secret, (err, token) => {
+      if (err) return jsonError(res, 401, err.message);
+      const since  = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('.')[0] + 'Z';
+      const filter = 'orderpaymentstatus:{PAID},creationdate:[' + since + '..]';
+      fetchUrl('https://api.ebay.com/sell/fulfillment/v1/order?limit=100&filter=' + encodeURIComponent(filter), {
+        headers: {
+          'Authorization':  'Bearer ' + token,
+          'Accept':         'application/json',
+          'Accept-Encoding':'gzip, deflate'
+        }
+      }, (err, body, status) => {
+        if (err) return jsonError(res, 502, err.message);
+        if (status !== 200) return jsonError(res, status, 'eBay Fulfillment API returned HTTP ' + status + ': ' + body.slice(0,200));
+        try {
+          const data   = JSON.parse(body);
+          const orders = (data.orders || []).map(o => ({
+            orderId:           o.orderId,
+            creationDate:      o.creationDate,
+            fulfillmentStatus: o.orderFulfillmentStatus,
+            buyer:             (o.buyer || {}).username || '',
+            lineItems: (o.lineItems || []).map(li => ({
+              lineItemId:   li.lineItemId,
+              legacyItemId: String(li.legacyItemId || ''),
+              title:        li.title || '',
+              quantity:     li.quantity || 1,
+              soldPrice:    parseFloat(((li.lineItemCost || {}).value) || 0),
+              currency:     ((li.lineItemCost || {}).currency) || 'GBP'
+            }))
+          }));
+          jsonOk(res, { orders, count: orders.length });
+        } catch(e) { jsonError(res, 502, 'Parse error: ' + e.message); }
       });
     });
     return;
