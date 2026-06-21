@@ -190,7 +190,7 @@ http.createServer((req, res) => {
     getAppToken(appId, secret, (err, token) => {
       if (err) return jsonError(res, 502, 'Auth failed: ' + err.message);
       fetchUrl('https://api.ebay.com/buy/browse/v1/item_summary/search?q='
-        + encodeURIComponent(q) + '&limit=40&fieldgroups=MATCHING_ITEMS', {
+        + encodeURIComponent(q) + '&limit=100&fieldgroups=MATCHING_ITEMS', {
         headers: {
           'Authorization':           'Bearer ' + token,
           'X-EBAY-C-MARKETPLACE-ID': 'EBAY_GB',
@@ -209,7 +209,19 @@ http.createServer((req, res) => {
             if (!isGraded && GRADED_RE.test(i.title || '')) return false;
             return true;
           });
-          const prices = items.map(i => Math.round(parseFloat(i.price.value) * 100) / 100).sort((a,b) => a - b);
+
+          let prices = items.map(i => Math.round(parseFloat(i.price.value) * 100) / 100).sort((a,b) => a - b);
+
+          // IQR outlier removal — strips extreme high/low values before calculating median
+          if (prices.length >= 6) {
+            const q1 = prices[Math.floor(prices.length * 0.25)];
+            const q3 = prices[Math.floor(prices.length * 0.75)];
+            const iqr = q3 - q1;
+            const lo  = q1 - 1.5 * iqr;
+            const hi  = q3 + 1.5 * iqr;
+            prices = prices.filter(p => p >= lo && p <= hi);
+          }
+
           const median = prices.length ? prices[Math.floor(prices.length / 2)] : null;
           jsonOk(res, { prices, median, count: prices.length, total: data.total || 0,
             items: items.slice(0,5).map(i => ({title:i.title, price:parseFloat(i.price.value), url:i.itemWebUrl})) });
