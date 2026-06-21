@@ -419,76 +419,30 @@ http.createServer((req, res) => {
       try { payload = JSON.parse(body); } catch(e) { return jsonError(res, 400, 'Invalid JSON'); }
       const { image, mimeType, apiKey } = payload;
       if (!image || !apiKey) return jsonError(res, 400, 'Missing image or apiKey');
-
-      // Promisify fetchUrl for cleaner async chaining
-      function callAnthropic(messages) {
-        return new Promise((resolve, reject) => {
-          const anthropicBody = JSON.stringify({
-            model: 'claude-haiku-4-5-20251001',
-            max_tokens: 700,
-            messages
-          });
-          fetchUrl('https://api.anthropic.com/v1/messages', {
-            method: 'POST',
-            headers: {
-              'x-api-key': apiKey,
-              'anthropic-version': '2023-06-01',
-              'content-type': 'application/json',
-              'content-length': Buffer.byteLength(anthropicBody)
-            },
-            body: anthropicBody
-          }, (err, data) => {
-            if (err) return reject(err);
-            try { resolve(JSON.parse(data)); } catch(e) { reject(new Error('Bad JSON from Anthropic')); }
-          });
-        });
-      }
-
-      // Helper: extract JSON from Anthropic response text
-      function extractJSON(apiResp) {
-        const text = (apiResp.content && apiResp.content[0] && apiResp.content[0].text) || '';
-        try { return JSON.parse(text.trim()); } catch(e) {
-          const m = text.match(/\{[\s\S]*\}/);
-          if (m) return JSON.parse(m[0]);
-          throw new Error('No JSON in response. API said: ' + text.slice(0, 200));
-        }
-      }
-
-      const imgContent = { type: 'image', source: { type: 'base64', media_type: mimeType || 'image/jpeg', data: image } };
-
-      const DETECT_PROMPT = 'Identify this Pokémon TCG card. Return ONLY a valid JSON object, no markdown, no explanation:\n{"cardName":"","setName":"","setCode":"","cardNumber":"","condition":"NM","conditionNotes":"","isGraded":false,"grader":null,"grade":null,"language":"EN","confidence":"high","notes":""}\n\nRules:\n- language: FIRST check the card\'s text script. If you see Japanese characters (hiragana/katakana/kanji), set "JP". Korean hangul → "KR". Latin/English text only → "EN".\n- cardName: If English, use the English name as printed. If Japanese with an official English release, use the English name (e.g. "Charizard" not "リザードン"). If Japanese with NO English release yet, transliterate (e.g. "ヒビキのマグカルゴ" → "Hibiki\'s Magcargo").\n- setCode: READ the code printed on the bottom-left of the card and copy it EXACTLY (e.g. "M2a", "SV1J", "SVP", "OBF"). Do NOT guess.\n- cardNumber: Copy exactly as printed (e.g. "197/193").\n- Condition: NM, LP, MP, HP, or DMG\n- confidence: high/medium/low — use "low" if you cannot clearly identify the card';
-
-      (async () => {
+      const anthropicBody = JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 600,
+        messages: [{ role: 'user', content: [
+          { type: 'image', source: { type: 'base64', media_type: mimeType || 'image/jpeg', data: image } },
+          { type: 'text', text: 'Identify this Pokémon TCG card. Return ONLY a valid JSON object, no markdown, no explanation:\n{"cardName":"","setName":"","setCode":"","cardNumber":"","condition":"NM","conditionNotes":"","isGraded":false,"grader":null,"grade":null,"language":"EN","confidence":"high","notes":""}\n\nRules:\n- language: Look at the card text. If you see Japanese characters (hiragana/katakana/kanji e.g. の、マグカルゴ、ドラメシャ), set "JP". Korean hangul → "KR". Latin text only → "EN".\n- cardName: Use the official English name if one exists (e.g. "Charizard" not "リザードン"). If it is a Japanese card with no English release, transliterate trainer name + English Pokémon name (e.g. "ヒビキのマグカルゴ" → "Hibiki\'s Magcargo", "ドラメシャ" → "Dreepy").\n- setCode: Look at the bottom-left of the card for the set code and copy it exactly as printed (e.g. "M2a", "SV1J", "S10a", "SVP", "OBF"). Do NOT invent or guess.\n- cardNumber: Copy exactly as printed (e.g. "197/193", "211/193").\n- Condition values: NM, LP, MP, HP, DMG\n- confidence: high/medium/low\n- notes: note if Japanese/Korean print' }
+        ]}]
+      });
+      fetchUrl('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(anthropicBody)
+        },
+        body: anthropicBody
+      }, (err, data) => {
+        if (err) return jsonError(res, 502, 'Anthropic error: ' + err.message);
         try {
-          // Step 1: Initial detection
-          const step1 = await callAnthropic([{ role: 'user', content: [imgContent, { type: 'text', text: DETECT_PROMPT }] }]);
-          if (step1.type === 'error') { return jsonOk(res, step1); }
-          let initial;
-          try { initial = extractJSON(step1); } catch(e) { return jsonOk(res, step1); } // return raw if parse fails
-
-          // Step 2: Self-verification — send image + initial result back, ask to verify
-          const VERIFY_PROMPT = `You identified this Pokémon TCG card as:\n${JSON.stringify(initial, null, 2)}\n\nPlease verify by looking at the card image again. Check each field carefully:\n1. LANGUAGE: Do you see Japanese hiragana/katakana/kanji on the card? If yes, language MUST be "JP" — not "EN".\n2. SET CODE: Look at the bottom-left corner of the card. What exact code is printed there? Common JP codes: M2a, SV1J, S10a, S12a, SM7J. Common EN codes: SVP, OBF, SVI, PRE. Copy exactly what you see.\n3. CARD NAME: Is the Pokémon name correct? Is the trainer name (if any) correctly transliterated?\n4. CARD NUMBER: Is the number correct (e.g. "197/193")?\n\nReturn ONLY the corrected JSON object (same format as above). If a field was already correct, keep it unchanged.`;
-
-          const step2 = await callAnthropic([
-            { role: 'user', content: [imgContent, { type: 'text', text: DETECT_PROMPT }] },
-            { role: 'assistant', content: step1.content },
-            { role: 'user', content: [imgContent, { type: 'text', text: VERIFY_PROMPT }] }
-          ]);
-          if (step2.type === 'error') { return jsonOk(res, step1); } // fall back to step1 if verify fails
-
-          // Merge: take verified result but keep step1 as fallback for any missing fields
-          let verified;
-          try {
-            verified = extractJSON(step2);
-            // Wrap in Anthropic-style response so client parser works unchanged
-            jsonOk(res, { content: [{ type: 'text', text: JSON.stringify(verified) }] });
-          } catch(e) {
-            jsonOk(res, step1); // verification parse failed — return original
-          }
-        } catch(e) {
-          jsonError(res, 502, 'Anthropic error: ' + e.message);
-        }
-      })();
+          const parsed = JSON.parse(data);
+          jsonOk(res, parsed);
+        } catch(e) { jsonError(res, 502, 'Bad response from Anthropic'); }
+      });
     });
     return;
   }
