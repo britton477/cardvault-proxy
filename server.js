@@ -185,12 +185,15 @@ http.createServer((req, res) => {
     if (!q || !appId || !secret) return jsonError(res, 400, 'Missing q, appid, or secret');
 
     // Graded card listings to exclude when pricing raw cards
-    const GRADED_RE = /\b(PSA|BGS|CGC|SGC|ACE|Arkezon|Beckett|graded|slab|slabbed)\b/i;
+    const GRADED_RE = /\b(PSA|BGS|CGC|SGC|ACE|Arkezon|Beckett|graded|grade\s*\d|gem\s*mint|slab|slabbed)\b/i;
 
     getAppToken(appId, secret, (err, token) => {
       if (err) return jsonError(res, 502, 'Auth failed: ' + err.message);
+      // Only listings from the past 14 days — avoids stale overpriced older stock
+      const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().split('.')[0] + 'Z';
+      const dateFilter = 'itemStartDate:[' + since + '..]';
       fetchUrl('https://api.ebay.com/buy/browse/v1/item_summary/search?q='
-        + encodeURIComponent(q) + '&limit=100&fieldgroups=MATCHING_ITEMS', {
+        + encodeURIComponent(q) + '&limit=50&filter=' + encodeURIComponent(dateFilter) + '&fieldgroups=MATCHING_ITEMS', {
         headers: {
           'Authorization':           'Bearer ' + token,
           'X-EBAY-C-MARKETPLACE-ID': 'EBAY_GB',
